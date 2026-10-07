@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>포즈로 조종하는 뱀게임</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px;
+    font-family: "Segoe UI", "Malgun Gothic", sans-serif;
+    background: #1e1f26; color: #eee;
+    display: flex; flex-direction: column; align-items: center;
+  }
+  h1 { margin: 0 0 12px; font-size: 26px; }
+  .wrap { display: flex; gap: 24px; flex-wrap: wrap; justify-content: center; }
+  .panel { background: #2a2c36; border-radius: 12px; padding: 16px; }
+  #game { background: #11131a; border-radius: 8px; display: block; }
+  .info { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 18px; }
+  #webcam-wrap canvas { border-radius: 8px; display: block; }
+  .bar-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 15px; }
+  .bar-row .name { width: 52px; }
+  .bar { flex: 1; height: 16px; background: #3a3d4a; border-radius: 8px; overflow: hidden; }
+  .bar > div { height: 100%; width: 0; background: #4caf50; transition: width .1s; }
+  .bar-row.active .name { color: #ffd54f; font-weight: bold; }
+  .bar-row.active .bar > div { background: #ffd54f; }
+  .bar-row .pct { width: 42px; text-align: right; }
+  button, select {
+    font-size: 16px; padding: 8px 16px; border: none; border-radius: 8px;
+    cursor: pointer; margin: 4px 4px 0 0;
+  }
+  button { background: #4caf50; color: #fff; }
+  button:disabled { background: #555; cursor: default; }
+  #status { margin-top: 10px; font-size: 14px; color: #aaa; min-height: 18px; }
+  #dir { font-size: 40px; text-align: center; margin: 8px 0; }
+  label { font-size: 14px; }
+</style>
+</head>
+<body>
+<h1>🐍 포즈로 조종하는 뱀게임</h1>
+
+<div class="wrap">
+  <div class="panel">
+    <div class="info">
+      <span>점수: <b id="score">0</b></span>
+      <span>최고: <b id="best">0</b></span>
+    </div>
+    <canvas id="game" width="400" height="400"></canvas>
+    <div>
+      <button id="startBtn" disabled>게임 시작</button>
+      <label>속도
+        <select id="speed">
+          <option value="350">느림</option>
+          <option value="250" selected>보통</option>
+          <option value="150">빠름</option>
+        </select>
+      </label>
+    </div>
+  </div>
+
+  <div class="panel" style="width: 280px;">
+    <button id="camBtn">웹캠 & 모델 켜기</button>
+    <div id="webcam-wrap" style="margin-top:10px;"></div>
+    <div id="dir">⏺</div>
+    <div id="bars"></div>
+    <label>인식 기준 확률:
+      <input type="range" id="threshold" min="0.5" max="0.99" step="0.01" value="0.8">
+      <span id="thVal">0.80</span>
+    </label>
+    <div id="status">키보드 방향키로도 조종할 수 있습니다.</div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@teachablemachine/pose@0.8/dist/teachablemachine-pose.min.js"></script>
+<script>
+// ===================== 모델 설정 =====================
+const MODEL_URL = "https://teachablemachine.withgoogle.com/models/FwVWL2ToT/";
+// 모델 라벨 → 방향
+const LABEL_TO_DIR = { "왼쪽": "left", "오른쪽": "right", "위": "up", "아래": "down" };
+const DIR_ARROW = { left: "⬅️", right: "➡️", up: "⬆️", down: "⬇️" };
+
+let model, webcam, ctxPose, maxPredictions;
+let threshold = 0.8;
+
+const statusEl = document.getElementById("status");
+const thInput = document.getElementById("threshold");
+thInput.oninput = () => {
+  threshold = parseFloat(thInput.value);
+  document.getElementById("thVal").textContent = threshold.toFixed(2);
+};
+
+document.getElementById("camBtn").onclick = async () => {
+  const btn = document.getElementById("camBtn");
+  btn.disabled = true;
+  statusEl.textContent = "모델 불러오는 중...";
+  try {
+    model = await tmPose.load(MODEL_URL + "model.json", MODEL_URL + "metadata.json");
+    maxPredictions = model.getTotalClasses();
+
+    const size = 248;
+    webcam = new tmPose.Webcam(size, size, true); // true = 좌우 반전
+    statusEl.textContent = "웹캠 권한 요청 중...";
+    await webcam.setup();
+    await webcam.play();
+
+    const canvas = document.createElement("canvas");
+    canvas.width = size; canvas.height = size;
+    ctxPose = canvas.getContext("2d");
+    document.getElementById("webcam-wrap").appendChild(canvas);
+
+    buildBars(model.getClassLabels());
+    statusEl.textContent = "준비 완료! 게임 시작을 누르세요.";
+    btn.textContent = "웹캠 실행 중";
+    document.getElementById("startBtn").disabled = false;
+    window.requestAnimationFrame(poseLoop);
+  } catch (e) {
+    console.error(e);
+    statusEl.textContent = "오류: " + e.message + " (로컬 서버로 열었는지 확인하세요)";
+    btn.disabled = false;
+  }
+};
+
+function buildBars(labels) {
+  const barsEl = document.getElementById("bars");
+  barsEl.innerHTML = "";
+  labels.forEach((l, i) => {
+    barsEl.insertAdjacentHTML("beforeend",
+      `<div class="bar-row" id="row${i}"><span class="name">${l}</span>
+        <div class="bar"><div id="bar${i}"></div></div><span class="pct" id="pct${i}">0%</span></div>`);
+  });
+}
+
+async function poseLoop() {
+  webcam.update();
+  await predict();
+  window.requestAnimationFrame(poseLoop);
+}
+
+async function predict() {
+  const { pose, posenetOutput } = await model.estimatePose(webcam.canvas);
+  const prediction = await model.predict(posenetOutput);
+
+  let best = prediction[0];
+  prediction.forEach((p, i) => {
+    const pct = Math.round(p.probability * 100);
+    document.getElementById("bar" + i).style.width = pct + "%";
+    document.getElementById("pct" + i).textContent = pct + "%";
+    if (p.probability > best.probability) best = p;
+  });
+  prediction.forEach((p, i) =>
+    document.getElementById("row" + i).classList.toggle("active", p === best && p.probability >= threshold));
+
+  if (best.probability >= threshold) {
+    const dir = LABEL_TO_DIR[best.className];
+    if (dir) {
+      setDirection(dir);
+      document.getElementById("dir").textContent = DIR_ARROW[dir];
+    }
+  }
+
+  // 웹캠 + 스켈레톤 그리기
+  ctxPose.drawImage(webcam.canvas, 0, 0);
+  if (pose) {
+    tmPose.drawKeypoints(pose.keypoints, 0.5, ctxPose);
+    tmPose.drawSkeleton(pose.keypoints, 0.5, ctxPose);
+  }
+}
+
+// ===================== 뱀게임 =====================
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const CELL = 20;
+const COLS = canvas.width / CELL;
+const ROWS = canvas.height / CELL;
+const OPPOSITE = { left: "right", right: "left", up: "down", down: "up" };
+const VEC = { left: [-1, 0], right: [1, 0], up: [0, -1], down: [0, 1] };
+
+let snake, dir, nextDir, food, score, timer, running = false;
+let best = parseInt(localStorage.getItem("snakeBest") || "0", 10);
+document.getElementById("best").textContent = best;
+
+function setDirection(d) {
+  if (!running) return;
+  // 현재 진행 방향의 반대로는 바로 꺾을 수 없음
+  if (d !== OPPOSITE[dir]) nextDir = d;
+}
+
+function resetGame() {
+  const cx = Math.floor(COLS / 2), cy = Math.floor(ROWS / 2);
+  snake = [{ x: cx, y: cy }, { x: cx - 1, y: cy }, { x: cx - 2, y: cy }];
+  dir = nextDir = "right";
+  score = 0;
+  document.getElementById("score").textContent = score;
+  placeFood();
+}
+
+function placeFood() {
+  do {
+    food = { x: Math.floor(Math.random() * COLS), y: Math.floor(Math.random() * ROWS) };
+  } while (snake.some(s => s.x === food.x && s.y === food.y));
+}
+
+function step() {
+  dir = nextDir;
+  const [dx, dy] = VEC[dir];
+  const head = { x: snake[0].x + dx, y: snake[0].y + dy };
+
+  const hitWall = head.x < 0 || head.y < 0 || head.x >= COLS || head.y >= ROWS;
+  const hitSelf = snake.some(s => s.x === head.x && s.y === head.y);
+  if (hitWall || hitSelf) return gameOver();
+
+  snake.unshift(head);
+  if (head.x === food.x && head.y === food.y) {
+    score++;
+    document.getElementById("score").textContent = score;
+    placeFood();
+  } else {
+    snake.pop();
+  }
+  draw();
+}
+
+function draw() {
+  ctx.fillStyle = "#11131a";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // 격자
+  ctx.strokeStyle = "#1c1f2a";
+  for (let i = 0; i <= COLS; i++) {
+    ctx.beginPath(); ctx.moveTo(i * CELL, 0); ctx.lineTo(i * CELL, canvas.height); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, i * CELL); ctx.lineTo(canvas.width, i * CELL); ctx.stroke();
+  }
+
+  // 먹이
+  ctx.fillStyle = "#ff5252";
+  ctx.beginPath();
+  ctx.arc(food.x * CELL + CELL / 2, food.y * CELL + CELL / 2, CELL / 2 - 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 뱀
+  snake.forEach((s, i) => {
+    ctx.fillStyle = i === 0 ? "#8bc34a" : "#4caf50";
+    ctx.fillRect(s.x * CELL + 1, s.y * CELL + 1, CELL - 2, CELL - 2);
+  });
+}
+
+function drawMessage(text, sub) {
+  ctx.fillStyle = "rgba(0,0,0,0.6)";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#fff";
+  ctx.textAlign = "center";
+  ctx.font = "bold 32px 'Malgun Gothic', sans-serif";
+  ctx.fillText(text, canvas.width / 2, canvas.height / 2 - 10);
+  if (sub) {
+    ctx.font = "16px 'Malgun Gothic', sans-serif";
+    ctx.fillText(sub, canvas.width / 2, canvas.height / 2 + 24);
+  }
+}
+
+function startGame() {
+  resetGame();
+  running = true;
+  draw();
+  clearInterval(timer);
+  timer = setInterval(step, parseInt(document.getElementById("speed").value, 10));
+  document.getElementById("startBtn").textContent = "다시 시작";
+}
+
+function gameOver() {
+  running = false;
+  clearInterval(timer);
+  if (score > best) {
+    best = score;
+    localStorage.setItem("snakeBest", best);
+    document.getElementById("best").textContent = best;
+  }
+  draw();
+  drawMessage("게임 오버", `점수: ${score}`);
+}
+
+document.getElementById("startBtn").onclick = startGame;
+
+// 키보드 보조 조작 (웹캠 없이도 테스트 가능)
+document.addEventListener("keydown", e => {
+  const map = { ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down" };
+  if (map[e.key]) { e.preventDefault(); setDirection(map[e.key]); }
+  if (e.key === " " && !running) { e.preventDefault(); startGame(); }
+});
+
+// 초기 화면
+resetGame();
+draw();
+drawMessage("웹캠을 켜고 시작하세요", "스페이스바로 키보드 모드 시작");
+</script>
+</body>
+</html>
