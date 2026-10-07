@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>포즈로 조종하는 뱀게임</title>
+<title>포즈로 하는 사과게임</title>
 <style>
   * { box-sizing: border-box; }
   body {
@@ -12,11 +12,15 @@
     background: #1e1f26; color: #eee;
     display: flex; flex-direction: column; align-items: center;
   }
-  h1 { margin: 0 0 12px; font-size: 26px; }
+  h1 { margin: 0 0 6px; font-size: 26px; }
+  .rule { margin: 0 0 14px; color: #bbb; font-size: 14px; text-align: center; }
   .wrap { display: flex; gap: 24px; flex-wrap: wrap; justify-content: center; }
   .panel { background: #2a2c36; border-radius: 12px; padding: 16px; }
-  #game { background: #11131a; border-radius: 8px; display: block; }
-  .info { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 18px; }
+  #game { background: #f4f1e6; border-radius: 8px; display: block; max-width: 100%; touch-action: none; cursor: crosshair; }
+  .info { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 18px; gap: 16px; }
+  #sum { font-size: 22px; font-weight: bold; }
+  .timebar { height: 10px; background: #3a3d4a; border-radius: 5px; overflow: hidden; margin-bottom: 10px; }
+  .timebar > div { height: 100%; width: 100%; background: #4caf50; transition: width .2s linear; }
   #webcam-wrap canvas { border-radius: 8px; display: block; }
   .bar-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 15px; }
   .bar-row .name { width: 52px; }
@@ -27,9 +31,9 @@
   .bar-row .pct { width: 42px; text-align: right; }
   button, select {
     font-size: 16px; padding: 8px 16px; border: none; border-radius: 8px;
-    cursor: pointer; margin: 4px 4px 0 0;
+    cursor: pointer; margin: 8px 4px 0 0;
   }
-  button { background: #4caf50; color: #fff; }
+  button { background: #e53935; color: #fff; }
   button:disabled { background: #555; cursor: default; }
   #status { margin-top: 10px; font-size: 14px; color: #aaa; min-height: 18px; }
   #dir { font-size: 40px; text-align: center; margin: 8px 0; }
@@ -37,22 +41,29 @@
 </style>
 </head>
 <body>
-<h1>🐍 포즈로 조종하는 뱀게임</h1>
+<h1>🍎 포즈로 하는 사과게임</h1>
+<p class="rule">
+  사각형 안 사과 숫자의 합이 <b>10</b>이 되면 사과가 사라집니다!<br>
+  포즈로 커서를 움직이면 선택 영역이 넓어지고, 합이 10을 넘으면 커서 위치에서 다시 선택을 시작합니다.
+</p>
 
 <div class="wrap">
   <div class="panel">
     <div class="info">
       <span>점수: <b id="score">0</b></span>
+      <span id="sum">합: 0</span>
       <span>최고: <b id="best">0</b></span>
+      <span>⏱ <b id="time">120</b>초</span>
     </div>
-    <canvas id="game" width="400" height="400"></canvas>
+    <div class="timebar"><div id="timefill"></div></div>
+    <canvas id="game" width="500" height="350"></canvas>
     <div>
-      <button id="startBtn" disabled>게임 시작</button>
-      <label>속도
+      <button id="startBtn">게임 시작</button>
+      <label>포즈 이동 속도
         <select id="speed">
-          <option value="350">느림</option>
-          <option value="250" selected>보통</option>
-          <option value="150">빠름</option>
+          <option value="900">느림</option>
+          <option value="600" selected>보통</option>
+          <option value="400">빠름</option>
         </select>
       </label>
     </div>
@@ -67,7 +78,7 @@
       <input type="range" id="threshold" min="0.5" max="0.99" step="0.01" value="0.8">
       <span id="thVal">0.80</span>
     </label>
-    <div id="status">키보드 방향키로도 조종할 수 있습니다.</div>
+    <div id="status">마우스 드래그나 방향키(+스페이스: 선택 다시 시작)로도 할 수 있습니다.</div>
   </div>
 </div>
 
@@ -76,12 +87,12 @@
 <script>
 // ===================== 모델 설정 =====================
 const MODEL_URL = "https://teachablemachine.withgoogle.com/models/FwVWL2ToT/";
-// 모델 라벨 → 방향
 const LABEL_TO_DIR = { "왼쪽": "left", "오른쪽": "right", "위": "up", "아래": "down" };
 const DIR_ARROW = { left: "⬅️", right: "➡️", up: "⬆️", down: "⬇️" };
 
-let model, webcam, ctxPose, maxPredictions;
+let model, webcam, ctxPose;
 let threshold = 0.8;
+let lastPoseMove = 0;
 
 const statusEl = document.getElementById("status");
 const thInput = document.getElementById("threshold");
@@ -96,7 +107,6 @@ document.getElementById("camBtn").onclick = async () => {
   statusEl.textContent = "모델 불러오는 중...";
   try {
     model = await tmPose.load(MODEL_URL + "model.json", MODEL_URL + "metadata.json");
-    maxPredictions = model.getTotalClasses();
 
     const size = 248;
     webcam = new tmPose.Webcam(size, size, true); // true = 좌우 반전
@@ -112,11 +122,10 @@ document.getElementById("camBtn").onclick = async () => {
     buildBars(model.getClassLabels());
     statusEl.textContent = "준비 완료! 게임 시작을 누르세요.";
     btn.textContent = "웹캠 실행 중";
-    document.getElementById("startBtn").disabled = false;
     window.requestAnimationFrame(poseLoop);
   } catch (e) {
     console.error(e);
-    statusEl.textContent = "오류: " + e.message + " (로컬 서버로 열었는지 확인하세요)";
+    statusEl.textContent = "오류: " + e.message;
     btn.disabled = false;
   }
 };
@@ -151,15 +160,16 @@ async function predict() {
   prediction.forEach((p, i) =>
     document.getElementById("row" + i).classList.toggle("active", p === best && p.probability >= threshold));
 
-  if (best.probability >= threshold) {
-    const dir = LABEL_TO_DIR[best.className];
-    if (dir) {
-      setDirection(dir);
-      document.getElementById("dir").textContent = DIR_ARROW[dir];
-    }
+  const dir = best.probability >= threshold ? LABEL_TO_DIR[best.className] : null;
+  document.getElementById("dir").textContent = dir ? DIR_ARROW[dir] : "⏺";
+
+  // 포즈를 유지하는 동안 일정 간격마다 한 칸씩 이동
+  const interval = parseInt(document.getElementById("speed").value, 10);
+  if (dir && performance.now() - lastPoseMove >= interval) {
+    lastPoseMove = performance.now();
+    moveCursor(dir);
   }
 
-  // 웹캠 + 스켈레톤 그리기
   ctxPose.drawImage(webcam.canvas, 0, 0);
   if (pose) {
     tmPose.drawKeypoints(pose.keypoints, 0.5, ctxPose);
@@ -167,131 +177,221 @@ async function predict() {
   }
 }
 
-// ===================== 뱀게임 =====================
+// ===================== 사과게임 =====================
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
-const CELL = 20;
-const COLS = canvas.width / CELL;
-const ROWS = canvas.height / CELL;
-const OPPOSITE = { left: "right", right: "left", up: "down", down: "up" };
-const VEC = { left: [-1, 0], right: [1, 0], up: [0, -1], down: [0, 1] };
+const COLS = 10, ROWS = 7, CELL = 50;
+const GAME_TIME = 120;
+const VEC = { left: [0, -1], right: [0, 1], up: [-1, 0], down: [1, 0] };
 
-let snake, dir, nextDir, food, score, timer, running = false;
-let best = parseInt(localStorage.getItem("snakeBest") || "0", 10);
+let grid, anchor, cursor, score, timeLeft, timer, running = false;
+let pops = []; // 터지는 효과
+let best = parseInt(localStorage.getItem("appleBest") || "0", 10);
 document.getElementById("best").textContent = best;
 
-function setDirection(d) {
-  if (!running) return;
-  // 현재 진행 방향의 반대로는 바로 꺾을 수 없음
-  if (d !== OPPOSITE[dir]) nextDir = d;
+function newGrid() {
+  grid = Array.from({ length: ROWS }, () =>
+    Array.from({ length: COLS }, () => 1 + Math.floor(Math.random() * 9)));
 }
 
-function resetGame() {
-  const cx = Math.floor(COLS / 2), cy = Math.floor(ROWS / 2);
-  snake = [{ x: cx, y: cy }, { x: cx - 1, y: cy }, { x: cx - 2, y: cy }];
-  dir = nextDir = "right";
-  score = 0;
-  document.getElementById("score").textContent = score;
-  placeFood();
+function rect() {
+  return {
+    r1: Math.min(anchor.r, cursor.r), r2: Math.max(anchor.r, cursor.r),
+    c1: Math.min(anchor.c, cursor.c), c2: Math.max(anchor.c, cursor.c),
+  };
 }
 
-function placeFood() {
-  do {
-    food = { x: Math.floor(Math.random() * COLS), y: Math.floor(Math.random() * ROWS) };
-  } while (snake.some(s => s.x === food.x && s.y === food.y));
+function rectSum() {
+  const { r1, r2, c1, c2 } = rect();
+  let s = 0;
+  for (let r = r1; r <= r2; r++) for (let c = c1; c <= c2; c++) s += grid[r][c];
+  return s;
 }
 
-function step() {
-  dir = nextDir;
-  const [dx, dy] = VEC[dir];
-  const head = { x: snake[0].x + dx, y: snake[0].y + dy };
+function resetAnchor() {
+  anchor = { ...cursor };
+}
 
-  const hitWall = head.x < 0 || head.y < 0 || head.x >= COLS || head.y >= ROWS;
-  const hitSelf = snake.some(s => s.x === head.x && s.y === head.y);
-  if (hitWall || hitSelf) return gameOver();
-
-  snake.unshift(head);
-  if (head.x === food.x && head.y === food.y) {
-    score++;
-    document.getElementById("score").textContent = score;
-    placeFood();
-  } else {
-    snake.pop();
+// 합이 10이면 사과 제거, 성공 여부 반환
+function tryClear() {
+  if (rectSum() !== 10) return false;
+  const { r1, r2, c1, c2 } = rect();
+  for (let r = r1; r <= r2; r++) for (let c = c1; c <= c2; c++) {
+    if (grid[r][c] > 0) {
+      score++;
+      pops.push({ r, c, n: grid[r][c], t: performance.now() });
+      grid[r][c] = 0;
+    }
   }
-  draw();
+  document.getElementById("score").textContent = score;
+  resetAnchor();
+  return true;
+}
+
+// 포즈/키보드 이동: 합이 10이면 자동 제거, 10을 넘으면 커서 위치에서 선택 다시 시작
+function moveCursor(dir) {
+  if (!running) return;
+  const [dr, dc] = VEC[dir];
+  const nr = cursor.r + dr, nc = cursor.c + dc;
+  if (nr < 0 || nc < 0 || nr >= ROWS || nc >= COLS) return;
+  cursor = { r: nr, c: nc };
+  if (!tryClear() && rectSum() > 10) resetAnchor();
+  updateSum();
+}
+
+function updateSum() {
+  const s = rectSum();
+  const el = document.getElementById("sum");
+  el.textContent = "합: " + s;
+  el.style.color = s === 10 ? "#66bb6a" : s > 10 ? "#ef5350" : "#fff";
+}
+
+function drawApple(x, y, n, scale = 1, alpha = 1) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(x, y);
+  ctx.scale(scale, scale);
+  ctx.fillStyle = "#e53935";
+  ctx.beginPath(); ctx.arc(0, 2, 19, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#43a047";
+  ctx.beginPath(); ctx.ellipse(6, -17, 7, 3.5, -0.5, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 20px 'Segoe UI', sans-serif";
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(n, 0, 3);
+  ctx.restore();
 }
 
 function draw() {
-  ctx.fillStyle = "#11131a";
+  ctx.fillStyle = "#f4f1e6";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  // 격자
-  ctx.strokeStyle = "#1c1f2a";
-  for (let i = 0; i <= COLS; i++) {
-    ctx.beginPath(); ctx.moveTo(i * CELL, 0); ctx.lineTo(i * CELL, canvas.height); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0, i * CELL); ctx.lineTo(canvas.width, i * CELL); ctx.stroke();
+  // 선택 영역
+  if (running) {
+    const { r1, r2, c1, c2 } = rect();
+    const s = rectSum();
+    ctx.fillStyle = s === 10 ? "rgba(102,187,106,0.35)" : s > 10 ? "rgba(239,83,80,0.25)" : "rgba(66,165,245,0.25)";
+    ctx.fillRect(c1 * CELL, r1 * CELL, (c2 - c1 + 1) * CELL, (r2 - r1 + 1) * CELL);
+    ctx.strokeStyle = "#1e88e5"; ctx.lineWidth = 2;
+    ctx.strokeRect(c1 * CELL + 1, r1 * CELL + 1, (c2 - c1 + 1) * CELL - 2, (r2 - r1 + 1) * CELL - 2);
   }
 
-  // 먹이
-  ctx.fillStyle = "#ff5252";
-  ctx.beginPath();
-  ctx.arc(food.x * CELL + CELL / 2, food.y * CELL + CELL / 2, CELL / 2 - 2, 0, Math.PI * 2);
-  ctx.fill();
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    if (grid[r][c] > 0) drawApple(c * CELL + CELL / 2, r * CELL + CELL / 2, grid[r][c]);
+  }
 
-  // 뱀
-  snake.forEach((s, i) => {
-    ctx.fillStyle = i === 0 ? "#8bc34a" : "#4caf50";
-    ctx.fillRect(s.x * CELL + 1, s.y * CELL + 1, CELL - 2, CELL - 2);
+  // 커서
+  if (running) {
+    ctx.strokeStyle = "#ff9800"; ctx.lineWidth = 4;
+    ctx.strokeRect(cursor.c * CELL + 3, cursor.r * CELL + 3, CELL - 6, CELL - 6);
+  }
+
+  // 터지는 효과
+  const now = performance.now();
+  pops = pops.filter(p => now - p.t < 400);
+  pops.forEach(p => {
+    const k = (now - p.t) / 400;
+    drawApple(p.c * CELL + CELL / 2, p.r * CELL + CELL / 2 - k * 20, p.n, 1 + k * 0.5, 1 - k);
   });
+
+  if (!running) {
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#fff"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.font = "bold 30px 'Malgun Gothic', sans-serif";
+    ctx.fillText(message.title, canvas.width / 2, canvas.height / 2 - 14);
+    ctx.font = "16px 'Malgun Gothic', sans-serif";
+    ctx.fillText(message.sub, canvas.width / 2, canvas.height / 2 + 22);
+  }
+  requestAnimationFrame(draw);
 }
 
-function drawMessage(text, sub) {
-  ctx.fillStyle = "rgba(0,0,0,0.6)";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = "#fff";
-  ctx.textAlign = "center";
-  ctx.font = "bold 32px 'Malgun Gothic', sans-serif";
-  ctx.fillText(text, canvas.width / 2, canvas.height / 2 - 10);
-  if (sub) {
-    ctx.font = "16px 'Malgun Gothic', sans-serif";
-    ctx.fillText(sub, canvas.width / 2, canvas.height / 2 + 24);
-  }
-}
+let message = { title: "사과게임", sub: "게임 시작을 누르세요 (스페이스바도 가능)" };
 
 function startGame() {
-  resetGame();
+  newGrid();
+  cursor = { r: 0, c: 0 };
+  resetAnchor();
+  score = 0;
+  timeLeft = GAME_TIME;
+  document.getElementById("score").textContent = 0;
   running = true;
-  draw();
+  updateSum();
+  updateTime();
   clearInterval(timer);
-  timer = setInterval(step, parseInt(document.getElementById("speed").value, 10));
+  timer = setInterval(() => {
+    timeLeft--;
+    updateTime();
+    if (timeLeft <= 0) endGame();
+  }, 1000);
   document.getElementById("startBtn").textContent = "다시 시작";
 }
 
-function gameOver() {
+function updateTime() {
+  document.getElementById("time").textContent = timeLeft;
+  const fill = document.getElementById("timefill");
+  fill.style.width = (timeLeft / GAME_TIME * 100) + "%";
+  fill.style.background = timeLeft <= 20 ? "#ef5350" : "#4caf50";
+}
+
+function endGame() {
   running = false;
   clearInterval(timer);
   if (score > best) {
     best = score;
-    localStorage.setItem("snakeBest", best);
+    localStorage.setItem("appleBest", best);
     document.getElementById("best").textContent = best;
   }
-  draw();
-  drawMessage("게임 오버", `점수: ${score}`);
+  message = { title: "시간 종료!", sub: `점수: ${score}개` };
 }
 
 document.getElementById("startBtn").onclick = startGame;
 
-// 키보드 보조 조작 (웹캠 없이도 테스트 가능)
+// 키보드: 방향키 이동, 스페이스 = 선택 다시 시작 (게임 전이면 시작)
 document.addEventListener("keydown", e => {
   const map = { ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down" };
-  if (map[e.key]) { e.preventDefault(); setDirection(map[e.key]); }
-  if (e.key === " " && !running) { e.preventDefault(); startGame(); }
+  if (map[e.key]) { e.preventDefault(); moveCursor(map[e.key]); }
+  if (e.key === " ") {
+    e.preventDefault();
+    if (!running) startGame(); else { resetAnchor(); updateSum(); }
+  }
 });
 
-// 초기 화면
-resetGame();
-draw();
-drawMessage("웹캠을 켜고 시작하세요", "스페이스바로 키보드 모드 시작");
+// 마우스/터치 드래그 (원래 사과게임 방식)
+let dragging = false;
+function cellFromEvent(e) {
+  const b = canvas.getBoundingClientRect();
+  const x = (e.clientX - b.left) * canvas.width / b.width;
+  const y = (e.clientY - b.top) * canvas.height / b.height;
+  return {
+    r: Math.max(0, Math.min(ROWS - 1, Math.floor(y / CELL))),
+    c: Math.max(0, Math.min(COLS - 1, Math.floor(x / CELL))),
+  };
+}
+canvas.addEventListener("pointerdown", e => {
+  if (!running) return;
+  dragging = true;
+  canvas.setPointerCapture(e.pointerId);
+  cursor = cellFromEvent(e);
+  resetAnchor();
+  updateSum();
+});
+canvas.addEventListener("pointermove", e => {
+  if (!dragging) return;
+  cursor = cellFromEvent(e);
+  updateSum();
+});
+canvas.addEventListener("pointerup", () => {
+  if (!dragging) return;
+  dragging = false;
+  if (!tryClear()) resetAnchor();
+  updateSum();
+});
+
+newGrid();
+cursor = { r: 0, c: 0 };
+resetAnchor();
+requestAnimationFrame(draw);
 </script>
 </body>
 </html>
